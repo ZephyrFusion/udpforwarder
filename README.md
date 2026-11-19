@@ -1,125 +1,162 @@
+# !! AI SLOP - DO NOT TRUST THIS CODE !!
+
+```
+    ###  #####     #### #      ###  ####
+   #   #   #      #     #     #   # #   #
+   #####   #       ###  #     #   # ####
+   #   #   #          # #     #   # #
+   #   # #####    ####  #####  ###  #
+```
+
+**WARNING: this repository is AI-generated slop.**
+
+Code, tests, comments and docs were all written by an AI and have not been reviewed
+by a human. It may contain bugs, security holes and plain bad design. Do not run it in
+production, and do not put real traffic or sensitive data through it.
+
+Passing `make test` does not mean the code is correct. Read every line with suspicion.
+
+---
+
 # udp forwarder
 
-把位于 NAT 之后的 client 背后的一个 UDP 端口，映射到有公网地址的 server 上。
+Maps one UDP port behind a NATed client onto a server that has a public address.
 
 ```
-互联网客户端 --udp--> server:data_port --(加密控制通道)--> client --udp--> 127.0.0.1:local_service_port
+internet client --udp--> server:data_port --(authenticated control channel)--> client --udp--> 127.0.0.1:local_service_port
 ```
 
-- 纯 C + epoll，libsodium 提供 HMAC-SHA256 与 KDF，静态链接（musl + 静态 libsodium）。
-- 只支持 IPv4，只支持单个 client。
-- 配置文件为 ini。
+- Plain C + epoll; libsodium provides HMAC-SHA256 and the KDF; statically linked
+  (musl + static libsodium).
+- IPv4 only, single client only.
+- Configuration files are ini.
 
-## 编译
+## Build
 
 ```sh
-make                    # 首次会先下载并编译 libsodium 静态库（需 musl-tools 与网络）
-make test               # 端到端测试（全部在 127.0.0.1 上跑，无需 root）
+make                    # downloads and builds the static libsodium on first run
+                        # (needs musl-tools and network access)
+make test               # end-to-end tests, all on 127.0.0.1, no root needed
 ```
 
-产物是单个静态二进制 `udpforwarder`，可直接 scp 到目标机器运行。
+The result is a single static binary `udpforwarder`; just scp it to the target machine.
 
-## 运行
+## Run
 
 ```sh
-# server（公网机器）
+# server (the machine with the public address)
 ./udpforwarder server -c examples/server.ini
 
-# client（NAT 之后的机器）
+# client (the machine behind NAT)
 ./udpforwarder client -c examples/client.ini
 ```
 
-默认配置路径分别为 `/etc/udpforwarder/server.ini` 与 `/etc/udpforwarder/client.ini`。
+The default config paths are `/etc/udpforwarder/server.ini` and
+`/etc/udpforwarder/client.ini`.
 
-### server 配置
+### server config
 
-| 键 | 说明 | 默认 |
+| Key | Meaning | Default |
 | --- | --- | --- |
-| `server.bind` | 监听地址，`0.0.0.0` 表示所有网卡 | `0.0.0.0` |
-| `server.control_port` | 控制端口（握手/心跳/回程数据） | 必填 |
-| `server.data_port` | 数据端口（互联网业务流量） | 必填 |
-| `server.client_idle_timeout` | 多久（秒）没收到握手就清除 client 控制地址 | 180 |
-| `key.psk` | 预共享密钥，见下 | 必填 |
+| `server.bind` | listen address, `0.0.0.0` means all interfaces | `0.0.0.0` |
+| `server.control_port` | control port (handshake/heartbeat/return traffic) | required |
+| `server.data_port` | data port (internet traffic) | required |
+| `server.client_idle_timeout` | forget the client control address after this many seconds without a handshake | 180 |
+| `key.psk` | pre-shared key, see below | required |
 
-### client 配置
+### client config
 
-| 键 | 说明 | 默认 |
+| Key | Meaning | Default |
 | --- | --- | --- |
-| `client.server_host` | server 的 IPv4 地址 | 必填 |
-| `client.server_control_port` | server 控制端口 | 必填 |
-| `client.local_service_host` | 本地服务地址 | `127.0.0.1` |
-| `client.local_service_port` | 本地服务端口 | 必填 |
-| `client.heartbeat_interval` | 心跳（握手）间隔，秒 | 30 |
-| `client.mapping_idle_timeout` | 映射空闲多久后清除，秒 | 120 |
-| `client.max_mappings` | 映射表上限 | 1024 |
+| `client.server_host` | IPv4 address of the server | required |
+| `client.server_control_port` | server control port | required |
+| `client.local_service_host` | local service address | `127.0.0.1` |
+| `client.local_service_port` | local service port | required |
+| `client.heartbeat_interval` | heartbeat (handshake) interval in seconds | 30 |
+| `client.mapping_idle_timeout` | drop a mapping after this many idle seconds | 120 |
+| `client.max_mappings` | upper bound of the mapping table | 1024 |
 
-`key.psk` 两种写法：64 个 hex 字符（推荐，`openssl rand -hex 32`）按 32 字节原始密钥处理；
-否则按口令处理（至少 16 字符），经 blake2b 拉长成 32 字节。两端必须一致。
+`key.psk` accepts two forms: 64 hex characters (recommended, `openssl rand -hex 32`) are
+used as a 32-byte raw key; anything else is treated as a passphrase (at least 16
+characters) and stretched to 32 bytes with blake2b. Both ends must match.
 
-### 密钥派生
+### Key derivation
 
 ```
-master = hex_decode(psk)            或  blake2b(psk)             # 口令时
+master = hex_decode(psk)            or  blake2b(psk)            # passphrase case
 key    = crypto_kdf_derive_from_key(32, id=1, context="udpfwd01", master)
 ```
 
-`key` 就是握手与 ACK 的 HMAC-SHA256 key。
+`key` is the HMAC-SHA256 key used for handshakes and ACKs.
 
-## 协议
+## Protocol
 
-控制端口上的每个报文第一个字节是类型。时间戳为 8 字节大端 Unix 秒，MAC 为
-HMAC-SHA256 的 32 字节原文。
+The first byte of every message on the control port is a type. Timestamps are 8-byte
+big-endian Unix seconds, MACs are the raw 32 bytes of HMAC-SHA256.
 
-| 报文 | 方向 | 格式 |
+| Message | Direction | Format |
 | --- | --- | --- |
-| 握手 | client → server | `0x00 \| ts(8) \| hmac(ts)(32)`，共 41 字节 |
-| 握手应答 | server → client | `0x02 \| 我方ts(8) \| server ts(8) \| hmac(两ts)(32)`，共 49 字节 |
-| 数据 | 双向 | `0x01 \| ipv4(4) \| port(2) \| payload` |
+| handshake | client -> server | `0x00 \| ts(8) \| hmac(ts)(32)`, 41 bytes |
+| handshake reply | server -> client | `0x02 \| our ts(8) \| server ts(8) \| hmac(both ts)(32)`, 49 bytes |
+| data | both ways | `0x01 \| ipv4(4) \| port(2) \| payload` |
 
-流程：
+Flow:
 
-1. client 启动后立即握手，之后每 `heartbeat_interval`（默认 30 秒）握手一次作为心跳。
-2. server 校验 MAC 与时间戳（与本机时间相差不超过 60 秒），通过后把该 UDP 来源地址记为
-   client 的控制地址，并回复 `0x02` 的 ACK（回显 client 的 ts，带上自己的 ts）。
-3. client 校验 ACK 的 MAC、server 时间戳窗口，以及回显的 ts 是否是自己最近发出的，
-   通过后认为链路可用。连续 3 个心跳周期收不到 ACK 则判定链路中断，开始重连式握手。
-4. 互联网客户端把报文发到 `data_port`，server 加上来源 `ipv4+port` 头后发给 client 控制地址。
-5. client 为每个来源 `ipv4+port` 分配一个 `127.0.0.1` 上的临时端口，与该来源一对一通信，
-   收到本地服务的回包后加上同样的头，用 `0x01` 发回 server 控制端口。
-6. server 去掉头，把 payload 从 `data_port` 发给对应的互联网客户端。
-7. `mapping_idle_timeout`（默认 120 秒）内没有流量的映射会被关闭清理。
+1. The client handshakes right after start-up, then once every `heartbeat_interval`
+   (30 seconds by default) as a heartbeat.
+2. The server checks the MAC and the timestamp (at most 60 seconds away from its own
+   clock), records that UDP source address as the client control address and replies
+   with a `0x02` ACK (echoing the client ts, carrying its own ts).
+3. The client checks the ACK's MAC, the server timestamp window, and that the echoed ts
+   is one it recently sent; only then is the link considered up. Three heartbeat periods
+   without an ACK are treated as a broken link and trigger a reconnecting handshake.
+4. An internet client sends a datagram to `data_port`; the server prefixes it with the
+   source `ipv4+port` header and sends it to the client control address.
+5. The client allocates an ephemeral port on `127.0.0.1` for every source `ipv4+port`
+   and talks to that source one-to-one; replies from the local service get the same
+   header and go back to the server control port as `0x01`.
+6. The server strips the header and sends the payload from `data_port` to the matching
+   internet client.
+7. Mappings without traffic for `mapping_idle_timeout` (120 seconds by default) are
+   closed and cleaned up.
 
-下行数据报文带 `0x01` 类型字节是为了和 ACK（`0x02`）在同一个控制端口上无歧义地区分开。
+Downstream data messages carry the `0x01` type byte so they can be told apart from ACKs
+(`0x02`) without ambiguity on the same control port.
 
-### 重放保护
+### Replay protection
 
-server 只接受时间戳比"上一次通过的握手时间戳"更大的握手；因此把抓到的握手报文原样重放
-（包括换个源地址重放）不会拿到 ACK。副作用：如果攻击者发来一个时间戳很超前的合法握手，
-真正的 client 在追上该时间戳之前的心跳会被拒绝（最长 60 秒），之后自愈。
+The server only accepts a handshake whose timestamp is greater than the timestamp of the
+last accepted handshake; replaying a captured handshake verbatim (including from a
+different source address) therefore never yields an ACK. Side effect: if an attacker
+sends a valid handshake with a far-future timestamp, the real client's heartbeats are
+rejected (for at most 60 seconds) until they catch up, after which it heals itself.
 
-### 安全边界
+### Security boundaries
 
-- 控制通道的完整性与握手认证靠 HMAC，但数据 payload 本身不加密（设计目标只是端口转发，
-  不是 VPN）。需要加密请叠加在应用层或改协议。
-- 数据端口对互联网开放，任何能发包到 `data_port` 的人都能借道访问 client 背后的本地服务，
-  请配合防火墙/本地服务的访问控制使用。
+- The control channel's integrity and the handshake authentication rely on HMAC, but the
+  data payload itself is not encrypted (the design goal is port forwarding, not a VPN).
+  If you need encryption, layer it on top or change the protocol.
+- The data port is open to the internet, so anyone who can send packets to `data_port`
+  can reach the local service behind the client. Use it together with a firewall and the
+  local service's own access control.
 
-## 已知限制
+## Known limitations
 
-- 只有单个 client，两份配置（server 与 client）是配对的。
-- client 的 NAT 出口端口变化后，要等下一次心跳（默认 ≤30 秒）server 才会更新目标地址，
-  这段时间内下行报文会打到旧端口而丢失。
-- 只有 IPv4。
+- Only a single client; the server and client configs are a matched pair.
+- When the client's NAT port changes, the server only learns the new target address on
+  the next heartbeat (at most 30 seconds by default); downstream datagrams sent in the
+  meantime hit the old port and are lost.
+- IPv4 only.
 
-## 目录结构
+## Layout
 
 ```
-src/main.c     命令行入口
-src/common.*   时间、日志、限速日志
-src/ini.*      ini 解析
-src/proto.*    报文格式、KDF、HMAC
-src/server.c   server：控制端口 + 数据端口
-src/client.c   client：映射表 + 本地服务收发
-tests/test_forward.py  端到端测试
-examples/*.ini 示例配置
+src/main.c     command line entry point
+src/common.*   clocks, logging, rate-limited logging
+src/ini.*      ini parser
+src/proto.*    message formats, KDF, HMAC
+src/server.c   server: control port + data port
+src/client.c   client: mapping table + local service I/O
+tests/test_forward.py  end-to-end tests
+examples/*.ini example configs
 ```
