@@ -1,0 +1,12 @@
+# 编译产物
+*.o
+/udpforwarder
+
+# 测试缓存
+__pycache__/
+*.pyc
+
+# third_party 只跟踪下载/构建脚本，libsodium 源码与静态库均不入库
+/third_party/libsodium-*/
+/third_party/libsodium-*.tar.gz
+/third_party/libsodium-musl/
