@@ -74,7 +74,7 @@ void ufw_ratelog_emit(struct ufw_ratelog *rl, const char *level, const char *fmt
     va_end(ap);
 
     if (rl->count > 1)
-        ufw_log(level, "%s（上次输出后共 %llu 次）", msg, (unsigned long long)rl->count);
+        ufw_log(level, "%s (%llu times since the last output)", msg, (unsigned long long)rl->count);
     else
         ufw_log(level, "%s", msg);
     rl->count = 0;

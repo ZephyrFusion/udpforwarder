@@ -1,4 +1,4 @@
-/* udp forwarder 入口：udpforwarder server|client -c 配置文件 */
+/* udp forwarder entry point: udpforwarder server|client -c config-file */
 #include <sodium.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,9 +11,9 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "udp forwarder %s\n"
-            "用法:\n"
-            "  %s server [-c 配置文件]   默认 /etc/udpforwarder/server.ini\n"
-            "  %s client [-c 配置文件]   默认 /etc/udpforwarder/client.ini\n",
+            "usage:\n"
+            "  %s server [-c config-file]   defaults to /etc/udpforwarder/server.ini\n"
+            "  %s client [-c config-file]   defaults to /etc/udpforwarder/client.ini\n",
             UFW_VERSION, prog, prog);
 }
 
@@ -33,7 +33,7 @@ int main(int argc, char **argv)
         return 0;
     }
     if (strcmp(mode, "server") != 0 && strcmp(mode, "client") != 0) {
-        fprintf(stderr, "未知模式: %s\n", mode);
+        fprintf(stderr, "unknown mode: %s\n", mode);
         usage(argv[0]);
         return 2;
     }
@@ -41,14 +41,14 @@ int main(int argc, char **argv)
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "%s 需要一个参数\n", argv[i]);
+                fprintf(stderr, "%s requires an argument\n", argv[i]);
                 return 2;
             }
             cfg = argv[++i];
         } else if (strncmp(argv[i], "--config=", 9) == 0) {
             cfg = argv[i] + 9;
         } else {
-            fprintf(stderr, "未知参数: %s\n", argv[i]);
+            fprintf(stderr, "unknown option: %s\n", argv[i]);
             usage(argv[0]);
             return 2;
         }
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
     }
 
     if (sodium_init() < 0) {
-        log_error("libsodium 初始化失败");
+        log_error("libsodium initialization failed");
         return 1;
     }
 

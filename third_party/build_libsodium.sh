@@ -1,8 +1,8 @@
 #!/bin/sh
-# 下载 libsodium 源码，并用 musl-gcc 编译成静态库
+# Downloads the libsodium source tarball and builds a static library with musl-gcc.
 #
-# 产物：third_party/libsodium-musl/{include,lib}（已加入 .gitignore）
-# 中间产物：third_party/libsodium-<ver>.tar.gz、third_party/libsodium-<ver>/
+# Output:  third_party/libsodium-musl/{include,lib} (git-ignored)
+# Byproducts: third_party/libsodium-<ver>.tar.gz, third_party/libsodium-<ver>/
 set -e
 cd "$(dirname "$0")"
 
@@ -14,19 +14,19 @@ PREFIX=$(pwd)/libsodium-musl
 URL="https://download.libsodium.org/libsodium/releases/$TARBALL"
 
 if [ -f "$PREFIX/lib/libsodium.a" ]; then
-    echo "libsodium.a 已存在，跳过"
+    echo "libsodium.a already present, skipping"
     exit 0
 fi
 
 if ! command -v musl-gcc >/dev/null 2>&1; then
-    echo "找不到 musl-gcc，请先安装 musl-tools" >&2
+    echo "musl-gcc not found, please install musl-tools" >&2
     exit 1
 fi
 
 if [ ! -f "$SRC/configure" ]; then
-    # 校验通过就直接用，否则重新下载
+    # reuse the tarball if its checksum matches, otherwise download it again
     if ! echo "$SHA256  $TARBALL" | sha256sum -c --status 2>/dev/null; then
-        echo "下载 $URL"
+        echo "downloading $URL"
         rm -f "$TARBALL.part"
         if command -v curl >/dev/null 2>&1; then
             curl -fL --retry 3 -o "$TARBALL.part" "$URL"
@@ -35,12 +35,12 @@ if [ ! -f "$SRC/configure" ]; then
         fi
         if ! echo "$SHA256  $TARBALL.part" | sha256sum -c --status; then
             rm -f "$TARBALL.part"
-            echo "校验失败：$TARBALL 的 sha256 不匹配" >&2
+            echo "checksum mismatch for $TARBALL" >&2
             exit 1
         fi
         mv "$TARBALL.part" "$TARBALL"
     fi
-    echo "解包 $TARBALL"
+    echo "extracting $TARBALL"
     rm -rf "$SRC"
     tar xzf "$TARBALL"
 fi
@@ -57,4 +57,4 @@ CC=musl-gcc CFLAGS="-O2 -fPIC" ./configure \
     >/dev/null
 make -j"$(nproc)" >/dev/null
 make install >/dev/null
-echo "libsodium 静态库已安装到 $PREFIX"
+echo "static libsodium installed into $PREFIX"

@@ -38,7 +38,7 @@ static char *trim(char *s)
 
 static void strip_comment(char *s)
 {
-    /* 只处理整行注释；行内以 " #" / " ;" 开始的部分也当作注释 */
+    /* Whole-line comments are dropped; an inline " #" or " ;" also starts a comment. */
     for (char *p = s; *p; p++) {
         if ((*p == '#' || *p == ';') && (p == s || isspace((unsigned char)p[-1]))) {
             *p = '\0';
@@ -69,13 +69,13 @@ ini_t *ini_load(const char *path, char *err, size_t errlen)
 
     fp = fopen(path, "r");
     if (!fp) {
-        snprintf(err, errlen, "无法打开配置文件 %s: %s", path, strerror(errno));
+        snprintf(err, errlen, "cannot open config file %s: %s", path, strerror(errno));
         return NULL;
     }
 
     ini = calloc(1, sizeof(*ini));
     if (!ini) {
-        snprintf(err, errlen, "内存不足");
+        snprintf(err, errlen, "out of memory");
         fclose(fp);
         return NULL;
     }
@@ -86,7 +86,7 @@ ini_t *ini_load(const char *path, char *err, size_t errlen)
 
         lineno++;
         if (!strchr(line, '\n') && !feof(fp)) {
-            snprintf(err, errlen, "%s:%lu: 行太长", path, lineno);
+            snprintf(err, errlen, "%s:%lu: line too long", path, lineno);
             goto fail;
         }
         strip_comment(line);
@@ -97,7 +97,7 @@ ini_t *ini_load(const char *path, char *err, size_t errlen)
         if (*s == '[') {
             char *rb = strchr(s, ']');
             if (!rb) {
-                snprintf(err, errlen, "%s:%lu: 段名缺少 ']'", path, lineno);
+                snprintf(err, errlen, "%s:%lu: section name is missing ']'", path, lineno);
                 goto fail;
             }
             *rb = '\0';
@@ -107,7 +107,7 @@ ini_t *ini_load(const char *path, char *err, size_t errlen)
 
         eq = strchr(s, '=');
         if (!eq) {
-            snprintf(err, errlen, "%s:%lu: 缺少 '='", path, lineno);
+            snprintf(err, errlen, "%s:%lu: missing '='", path, lineno);
             goto fail;
         }
         *eq = '\0';
@@ -117,11 +117,11 @@ ini_t *ini_load(const char *path, char *err, size_t errlen)
 
             strip_quotes(val);
             if (*key == '\0') {
-                snprintf(err, errlen, "%s:%lu: 键名为空", path, lineno);
+                snprintf(err, errlen, "%s:%lu: empty key name", path, lineno);
                 goto fail;
             }
             if (ini->count >= INI_MAX_ENTRIES) {
-                snprintf(err, errlen, "%s:%lu: 条目太多（上限 %d）", path, lineno,
+                snprintf(err, errlen, "%s:%lu: too many entries (limit %d)", path, lineno,
                          INI_MAX_ENTRIES);
                 goto fail;
             }

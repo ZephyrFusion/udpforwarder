@@ -1,29 +1,42 @@
-实现一个udp forwarder，把client上的一个udp server port转发到server上，server listen，然后转发给client。client是一个nat后的机器。
+Implement a udp forwarder that exposes one UDP server port of a client on a server:
+the server listens and forwards to the client, which sits behind NAT.
 
-# 协议设计
+# Protocol design
 
-server和client配置文件里面有一个pre shared key，其kdf结果为hmac的key。
+The server and client configs share a pre-shared key; the KDF result of that key is the
+HMAC key.
 
-server listen 2个udp端口
+The server listens on 2 UDP ports.
 
-第一个端口是控制端口，client发送0x00加上当前时间戳，和当前时间戳的hmac。server收到后，验证hmac和时间戳（要求在1分钟以内）把这个udp端口作为跟client通信的端口，并回一个0x02的ack（回显client时间戳+server时间戳+hmac）。client每30秒发一次握手作为心跳，用来刷新nat映射并确认链路存活。
+The first port is the control port. The client sends 0x00, the current timestamp, and the
+HMAC of that timestamp. On receipt the server verifies the HMAC and the timestamp (must be
+within 1 minute) and takes that UDP port as the port it talks to the client on, then
+replies with a 0x02 ACK (echoed client timestamp + server timestamp + HMAC). The client
+sends a handshake every 30 seconds as a heartbeat, which refreshes the NAT mapping and
+confirms the link is alive.
 
-第二个端口是数据端口。互联网上的客户端正常发送packet到这个端口。server把这个payload加上48bit的ipv4地址+端口号header，发送给client通信端口。client用127.0.0.1模拟不同的客户端，跟本地的udp service通讯，然后把udp server返回的结果加上0x01和48bit的ipv4地址+端口号header，发动给server的控制端口，server转发经过数据端口返回给互联网上的客户端。
+The second port is the data port. Clients on the internet send packets to this port as
+usual. The server prefixes the payload with a 48-bit IPv4 address + port header and sends
+it to the client's communication port. The client emulates the different clients with
+127.0.0.1 sockets, talks to the local udp service, then takes the replies of the udp
+server, prefixes them with 0x01 and the 48-bit IPv4 address + port header, and sends them
+to the server control port; the server forwards them back through the data port to the
+internet client.
 
-控制端口上每个报文第一个字节是类型，所以server发给client的数据报文同样带0x01前缀（0x01 + 48bit header + payload），以便和0x02的ack区分。
+The first byte of every message on the control port is a type, so data messages from the
+server to the client also carry a 0x01 prefix (0x01 + 48-bit header + payload) so that they
+can be told apart from the 0x02 ACK.
 
-client需要维护一个127.0.0.1端口 到 ipv4+端口 的映射。2分钟不活跃的端口要清除掉映射。
+The client keeps a mapping from 127.0.0.1 port to ipv4+port. Ports idle for 2 minutes must
+have their mapping removed.
 
-只需要支持ipv4
+IPv4 only.
 
-# 要求
+# Requirements
 
-纯C
-网络只用epoll
-密码库只用libsodium
-配置文件用ini
-静态链接，libc用musl
-libsodium用源码编译成静态库。
-
-
-
+Plain C.
+Networking with epoll only.
+Crypto library: libsodium only.
+Config files in ini.
+Static linking, musl as libc.
+libsodium built from source into a static library.

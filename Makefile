@@ -1,4 +1,4 @@
-# 静态链接（musl + libsodium 静态库）的 udp forwarder
+# udp forwarder, statically linked (musl + static libsodium)
 ifeq ($(origin CC),default)
 CC := musl-gcc
 endif

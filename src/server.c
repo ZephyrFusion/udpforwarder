@@ -1,4 +1,5 @@
-/* server 端：控制端口接收 client 的握手与回程数据，数据端口对互联网收发 */
+/* Server side: the control port receives client handshakes and return traffic,
+ * the data port talks to the internet. */
 #include "server.h"
 
 #include <arpa/inet.h>
@@ -24,10 +25,10 @@ struct server {
 
     unsigned char key[FWD_KEY_LEN];
 
-    struct sockaddr_in client; /* client 的控制端口地址，由握手学习得到 */
+    struct sockaddr_in client; /* client control address, learned from handshakes */
     int have_client;
-    uint64_t client_seen_ms; /* 最近一次有效握手的单调时间 */
-    uint64_t client_last_ts; /* 最近一次接受的握手时间戳，用于反重放 */
+    uint64_t client_seen_ms; /* monotonic time of the latest valid handshake */
+    uint64_t client_last_ts; /* last accepted handshake timestamp, for replay protection */
     uint64_t client_idle_ms;
 
     struct ufw_ratelog rl_data_noclient;
@@ -57,13 +58,13 @@ static int udp_bind(const char *bind_addr, unsigned long port)
     if (!bind_addr || strcmp(bind_addr, "0.0.0.0") == 0) {
         sin.sin_addr.s_addr = htonl(INADDR_ANY);
     } else if (inet_pton(AF_INET, bind_addr, &sin.sin_addr) != 1) {
-        log_error("[" EP_NAME "] bind 地址不合法: %s", bind_addr);
+        log_error("[" EP_NAME "] bind address is invalid: %s", bind_addr);
         close(fd);
         return -1;
     }
 
     if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
-        log_error("[" EP_NAME "] bind %s:%lu 失败: %s", bind_addr ? bind_addr : "0.0.0.0",
+        log_error("[" EP_NAME "] bind %s:%lu failed: %s", bind_addr ? bind_addr : "0.0.0.0",
                   port, strerror(errno));
         close(fd);
         return -1;
@@ -90,11 +91,11 @@ static void send_to_client(struct server *s, const uint8_t *buf, size_t len)
     if (!s->have_client)
         return;
     if (sendto(s->ctl_fd, buf, len, 0, (struct sockaddr *)&s->client, sizeof(s->client)) < 0)
-        ufw_ratelog_emit(&s->rl_bad_data, "WARN", "[" EP_NAME "] 发给 client 失败: %s",
+        ufw_ratelog_emit(&s->rl_bad_data, "WARN", "[" EP_NAME "] failed to send to client: %s",
                          strerror(errno));
 }
 
-/* 数据端口：互联网客户端 -> client 控制端口 */
+/* Data port: internet client -> client control port. */
 static void on_data_readable(struct server *s)
 {
     uint8_t hdr[FWD_HDR_LEN];
@@ -111,13 +112,13 @@ static void on_data_readable(struct server *s)
                 return;
             if (errno == EINTR)
                 continue;
-            log_error("[" EP_NAME "] 数据端口 recvfrom: %s", strerror(errno));
+            log_error("[" EP_NAME "] data port recvfrom: %s", strerror(errno));
             return;
         }
 
         if (!s->have_client) {
             ufw_ratelog_emit(&s->rl_data_noclient, "WARN",
-                             "[" EP_NAME "] 还没收到 client 握手，丢弃数据报文");
+                             "[" EP_NAME "] no client handshake yet, dropping data packet");
             continue;
         }
 
@@ -136,7 +137,7 @@ static int same_sockaddr(const struct sockaddr_in *a, const struct sockaddr_in *
     return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
 }
 
-/* 控制端口：握手 0x00 与 client 回程数据 0x01 */
+/* Control port: handshakes (0x00) and client return traffic (0x01). */
 static void on_ctl_readable(struct server *s)
 {
     for (;;) {
@@ -150,7 +151,7 @@ static void on_ctl_readable(struct server *s)
                 return;
             if (errno == EINTR)
                 continue;
-            log_error("[" EP_NAME "] 控制端口 recvfrom: %s", strerror(errno));
+            log_error("[" EP_NAME "] control port recvfrom: %s", strerror(errno));
             return;
         }
         if (n < 1)
@@ -162,39 +163,42 @@ static void on_ctl_readable(struct server *s)
 
             if (rc == -2) {
                 ufw_ratelog_emit(&s->rl_bad_hello, "WARN",
-                                 "[" EP_NAME "] 握手时间戳超出 ±%d 秒，忽略",
+                                 "[" EP_NAME "] handshake timestamp is off by more than "
+                                 "±%d seconds, ignoring",
                                  FWD_TS_MAX_SKEW);
                 continue;
             }
             if (rc != 0) {
                 ufw_ratelog_emit(&s->rl_bad_hello, "WARN",
-                                 "[" EP_NAME "] 握手 MAC 校验失败，忽略（psk 不一致？）");
+                                 "[" EP_NAME "] handshake MAC verification failed, ignoring "
+                                 "(psk mismatch?)");
                 continue;
             }
-            /* 反重放：来源地址变了就要求时间戳严格递增 */
+            /* Replay protection: whenever the source differs from the learned
+             * client, the timestamp must strictly increase. */
             if (!(s->have_client && same_sockaddr(&src, &s->client)) && ts <= s->client_last_ts) {
                 ufw_ratelog_emit(&s->rl_bad_hello, "WARN",
-                                 "[" EP_NAME "] 握手时间戳重复（重放？），忽略");
+                                 "[" EP_NAME "] duplicate handshake timestamp (replay?), ignoring");
                 continue;
             }
 
             if (!s->have_client || !same_sockaddr(&src, &s->client)) {
                 char buf[INET_ADDRSTRLEN] = {0};
                 inet_ntop(AF_INET, &src.sin_addr, buf, sizeof(buf));
-                log_info("[" EP_NAME "] client 控制地址更新为 %s:%u，已回应握手 ACK", buf,
-                         ntohs(src.sin_port));
+                log_info("[" EP_NAME "] client control address updated to %s:%u, "
+                         "handshake ACK sent", buf, ntohs(src.sin_port));
             }
             s->client = src;
             s->have_client = 1;
             s->client_seen_ms = ufw_mono_ms();
             if (ts > s->client_last_ts)
                 s->client_last_ts = ts;
-            /* 回 ACK：回显 client 时间戳，并带上 server 自己的时间戳 */
+            /* Reply with an ACK: echo the client timestamp and add our own. */
             fwd_ack_build(s->key, ts, ufw_realtime_s(), s->ack);
             if (sendto(s->ctl_fd, s->ack, sizeof(s->ack), 0, (struct sockaddr *)&src,
                        sizeof(src)) < 0)
                 ufw_ratelog_emit(&s->rl_bad_hello, "WARN",
-                                 "[" EP_NAME "] 发送握手 ACK 失败: %s", strerror(errno));
+                                 "[" EP_NAME "] failed to send handshake ACK: %s", strerror(errno));
             continue;
         }
 
@@ -204,12 +208,13 @@ static void on_ctl_readable(struct server *s)
 
             if (!s->have_client || !same_sockaddr(&src, &s->client)) {
                 ufw_ratelog_emit(&s->rl_bad_data, "WARN",
-                                 "[" EP_NAME "] 丢弃来自未认证地址的转发数据");
+                                 "[" EP_NAME "] dropping forwarded data from an "
+                                 "unauthenticated address");
                 continue;
             }
             if (payload_len < 0) {
                 ufw_ratelog_emit(&s->rl_bad_data, "WARN",
-                                 "[" EP_NAME "] 丢弃过短的转发数据报文");
+                                 "[" EP_NAME "] dropping short forwarded data packet");
                 continue;
             }
             fwd_hdr_unpack(s->rx + 1, &to);
@@ -223,13 +228,13 @@ static void on_ctl_readable(struct server *s)
                 if (sendto(s->data_fd, s->rx + 1 + FWD_HDR_LEN, (size_t)payload_len, 0,
                            (struct sockaddr *)&dst, sizeof(dst)) < 0)
                     ufw_ratelog_emit(&s->rl_bad_data, "WARN",
-                                     "[" EP_NAME "] 数据端口回包失败: %s", strerror(errno));
+                                     "[" EP_NAME "] data port reply failed: %s", strerror(errno));
             }
             continue;
         }
 
-        ufw_ratelog_emit(&s->rl_bad_data, "WARN", "[" EP_NAME "] 控制端口收到未知类型 %u",
-                         s->rx[0]);
+        ufw_ratelog_emit(&s->rl_bad_data, "WARN",
+                         "[" EP_NAME "] unknown message type %u on control port", s->rx[0]);
     }
 }
 
@@ -239,7 +244,8 @@ static void sweep_client(struct server *s)
         return;
     if (ufw_mono_ms() - s->client_seen_ms > s->client_idle_ms) {
         s->have_client = 0;
-        log_info("[" EP_NAME "] client 超过 %llu 秒没有握手，清除其控制地址",
+        log_info("[" EP_NAME "] client has not sent a handshake for more than %llu seconds, "
+                 "clearing its control address",
                  (unsigned long long)(s->client_idle_ms / 1000));
     }
 }
@@ -267,16 +273,16 @@ int server_main(const char *cfg_path)
 
     if (ini_get_uint(ini, "server", "control_port", 0, 1, 65535, &control_port) != 0 ||
         control_port == 0) {
-        log_error("[" EP_NAME "] server.control_port 缺失或不在 1-65535 之间");
+        log_error("[" EP_NAME "] server.control_port is missing or not within 1-65535");
         goto out;
     }
     if (ini_get_uint(ini, "server", "data_port", 0, 1, 65535, &data_port) != 0 ||
         data_port == 0) {
-        log_error("[" EP_NAME "] server.data_port 缺失或不在 1-65535 之间");
+        log_error("[" EP_NAME "] server.data_port is missing or not within 1-65535");
         goto out;
     }
     if (ini_get_uint(ini, "server", "client_idle_timeout", 180, 10, 86400, &idle_sec) != 0) {
-        log_error("[" EP_NAME "] client_idle_timeout 不合法");
+        log_error("[" EP_NAME "] client_idle_timeout is invalid");
         goto out;
     }
     bind_addr = ini_get(ini, "server", "bind");
@@ -308,14 +314,15 @@ int server_main(const char *cfg_path)
     s.rx = malloc(UFW_MAX_PKT);
     s.tx = malloc(UFW_MAX_PKT + 1 + FWD_HDR_LEN);
     if (!s.rx || !s.tx) {
-        log_error("[" EP_NAME "] 内存不足");
+        log_error("[" EP_NAME "] out of memory");
         goto out;
     }
     ufw_ratelog_reset(&s.rl_data_noclient);
     ufw_ratelog_reset(&s.rl_bad_hello);
     ufw_ratelog_reset(&s.rl_bad_data);
 
-    log_info("[" EP_NAME "] 监听 %s 控制端口 %lu / 数据端口 %lu", bind_addr ? bind_addr : "*",
+    log_info("[" EP_NAME "] listening on %s control port %lu / data port %lu",
+             bind_addr ? bind_addr : "*",
              control_port, data_port);
 
     for (;;) {

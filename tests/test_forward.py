@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""udp forwarder 端到端测试。
+"""End-to-end tests for the udp forwarder.
 
-需要先编译出 ./udpforwarder（make）。全部用例都在 127.0.0.1 上跑，
-不依赖外网，也不需要 root 权限。
+Build ./udpforwarder first (make). Every case runs on 127.0.0.1, so neither
+internet access nor root privileges are required.
 """
 import hashlib
 import hmac
@@ -26,7 +26,7 @@ TYPE_ACK = 0x02
 TS_SKEW = 60
 
 
-# ---------------------------------------------------------------- 工具函数
+# ---------------------------------------------------------------- helpers
 def free_udp_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind(("127.0.0.1", 0))
@@ -36,7 +36,7 @@ def free_udp_port():
 
 
 def derive_key(psk_hex=PSK_HEX):
-    """复现 proto.c 的 kdf：blake2b(key=master, salt=id_le64, personal=context)。"""
+    """Mirrors the kdf in proto.c: blake2b(key=master, salt=id_le64, personal=context)."""
     master = bytes.fromhex(psk_hex)
     salt = struct.pack("<Q", 1) + b"\0" * 8
     person = b"udpfwd01" + b"\0" * 8
@@ -59,14 +59,14 @@ def ack_pkt(key, client_ts, server_ts=None):
 
 
 def check_ack(pkt, key, client_ts):
-    assert len(pkt) == 49, f"ACK 长度应为 49，实际 {len(pkt)}"
-    assert pkt[0] == TYPE_ACK, f"ACK 类型字节应为 0x02，实际 {pkt[0]:#04x}"
+    assert len(pkt) == 49, f"expected ACK length 49, got {len(pkt)}"
+    assert pkt[0] == TYPE_ACK, f"expected ACK type byte 0x02, got {pkt[0]:#04x}"
     body = pkt[1:17]
     cts, sts = struct.unpack(">QQ", body)
-    assert cts == client_ts, f"ACK 未回显我方时间戳：{cts} != {client_ts}"
-    assert abs(sts - time.time()) <= TS_SKEW + 5, f"ACK 里 server 时间戳异常：{sts}"
+    assert cts == client_ts, f"ACK did not echo our timestamp: {cts} != {client_ts}"
+    assert abs(sts - time.time()) <= TS_SKEW + 5, f"unexpected server timestamp in ACK: {sts}"
     expect = hmac.new(key, body, hashlib.sha256).digest()
-    assert expect == pkt[17:], "ACK 的 HMAC 校验失败"
+    assert expect == pkt[17:], "ACK HMAC verification failed"
 
 
 def wait_until(pred, timeout=5.0, interval=0.02, desc=""):
@@ -75,7 +75,7 @@ def wait_until(pred, timeout=5.0, interval=0.02, desc=""):
         if pred():
             return True
         time.sleep(interval)
-    raise AssertionError(f"等待超时：{desc or pred}")
+    raise AssertionError(f"timed out waiting for: {desc or pred}")
 
 
 def recv_or_none(sock, timeout=1.0):
@@ -86,9 +86,9 @@ def recv_or_none(sock, timeout=1.0):
         return None
 
 
-# ---------------------------------------------------------------- 测试环境
+# ---------------------------------------------------------------- test environment
 class EchoService:
-    """本地 UDP 回显服务，模拟 client 背后的 UDP server。"""
+    """Local UDP echo service, standing in for the UDP server behind the client."""
 
     def __init__(self, salt=b""):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -182,12 +182,13 @@ max_mappings = {max_mappings}
 [key]
 psk = {psk}
 """)
-            wait_until(lambda: "client 控制地址更新为" in self.server.text(), 8,
-                       desc="server 收到 client 握手")
-            wait_until(lambda: "握手成功" in self.client.text(), 8,
-                       desc="client 收到握手 ACK")
+            wait_until(lambda: "client control address updated to" in self.server.text(), 8,
+                       desc="server received the client handshake")
+            wait_until(lambda: "handshake with server succeeded" in self.client.text(), 8,
+                       desc="client got the handshake ACK")
         else:
-            wait_until(lambda: "监听 127.0.0.1" in self.server.text(), 8, desc="server 启动")
+            wait_until(lambda: "listening on 127.0.0.1" in self.server.text(), 8,
+                       desc="server started")
 
     def stop(self):
         if self.client:
@@ -208,9 +209,10 @@ def inet_client():
     return s
 
 
-# ---------------------------------------------------------------- 测试用例
+# ---------------------------------------------------------------- test cases
 def test_basic_forward():
-    """互联网侧的 UDP 报文能经 server/client 到达本地服务并原路返回。"""
+    """An internet-side datagram reaches the local service through server/client and
+    comes back."""
     env = Env()
     try:
         c = inet_client()
@@ -224,7 +226,7 @@ def test_basic_forward():
 
 
 def test_multi_client_isolation():
-    """多个互联网客户端并发访问，各自拿到自己的回包（映射互不串扰）。"""
+    """Concurrent internet clients each get their own replies (mappings never cross-talk)."""
     env = Env()
     try:
         socks = [inet_client() for _ in range(5)]
@@ -233,7 +235,7 @@ def test_multi_client_isolation():
         for i, s in enumerate(socks):
             got = s.recv(65535)
             assert got == f"echo:pkt-{i}".encode(), (i, got)
-        # 再来一轮，复用已有映射
+        # another round, reusing the existing mapping
         for i, s in enumerate(socks):
             s.sendto(f"again-{i}".encode(), ("127.0.0.1", env.data_port))
         for i, s in enumerate(socks):
@@ -247,14 +249,14 @@ def test_multi_client_isolation():
 
 
 def test_big_and_empty_payload():
-    """最大长度报文与空报文都能转发。"""
+    """Both maximum-size and empty datagrams are forwarded."""
     env = Env()
     try:
         c = inet_client()
-        payload = bytes(range(256)) * 200  # 51200 字节
+        payload = bytes(range(256)) * 200  # 51200 bytes
         c.sendto(payload, ("127.0.0.1", env.data_port))
         got = c.recv(65535)
-        assert got == b"echo:" + payload, f"大报文长度不符: {len(got)}"
+        assert got == b"echo:" + payload, f"unexpected large-datagram length: {len(got)}"
 
         c.settimeout(0.6)
         c.sendto(b"", ("127.0.0.1", env.data_port))
@@ -267,7 +269,7 @@ def test_big_and_empty_payload():
 
 
 def test_ack_protocol():
-    """0x00 握手能得到 0x02 的 ACK，且回显我方时间戳、HMAC 正确。"""
+    """A 0x00 handshake gets a 0x02 ACK that echoes our timestamp with a valid HMAC."""
     env = Env(with_client=False)
     try:
         key = derive_key()
@@ -279,7 +281,7 @@ def test_ack_protocol():
         ack = s.recv(1024)
         check_ack(ack, key, ts)
 
-        # 第二次握手（心跳）也要有 ACK
+        # the second handshake (heartbeat) must be ACKed too
         ts2 = int(time.time()) + 1
         s.sendto(hello_pkt(key, ts2), ("127.0.0.1", env.control_port))
         check_ack(s.recv(1024), key, ts2)
@@ -290,9 +292,9 @@ def test_ack_protocol():
 
 
 def test_heartbeat_default_30s():
-    """默认心跳间隔是 30 秒（配置里不写 heartbeat_interval 时）。"""
+    """The default heartbeat interval is 30 seconds (when heartbeat_interval is absent)."""
     env = Env(heartbeat=None) if False else None
-    # 用不带 heartbeat_interval 的配置启动，检查日志里的提示
+    # start with a config that omits heartbeat_interval and check the log line
     svc = EchoService()
     cport, dport = free_udp_port(), free_udp_port()
     server = Proc("server", f"""
@@ -312,7 +314,8 @@ local_service_port = {svc.port}
 psk = {PSK_HEX}
 """)
     try:
-        wait_until(lambda: "心跳间隔 30 秒" in client.text(), 8, desc="默认心跳间隔 30 秒")
+        wait_until(lambda: "heartbeat interval 30 seconds" in client.text(), 8,
+                   desc="default heartbeat interval is 30 seconds")
     finally:
         client.stop()
         server.stop()
@@ -322,7 +325,7 @@ psk = {PSK_HEX}
 
 
 def test_reject_bad_mac():
-    """MAC 错误的握手不应得到 ACK。"""
+    """A handshake with a bad MAC must not be ACKed."""
     env = Env(with_client=False)
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -330,16 +333,16 @@ def test_reject_bad_mac():
         s.settimeout(1.0)
         wrong = derive_key("ff" * 32)
         s.sendto(hello_pkt(wrong), ("127.0.0.1", env.control_port))
-        assert recv_or_none(s, 1.0) is None, "错误 psk 的握手竟收到回应"
+        assert recv_or_none(s, 1.0) is None, "handshake with a wrong psk was answered"
         s.close()
-        assert "MAC 校验失败" in env.server.text()
+        assert "MAC verification failed" in env.server.text()
     finally:
         env.stop()
         env.cleanup()
 
 
 def test_reject_stale_and_future_ts():
-    """时间戳超出 ±60 秒的握手应被拒绝。"""
+    """Handshakes whose timestamp is more than 60 seconds off must be rejected."""
     env = Env(with_client=False)
     try:
         key = derive_key()
@@ -348,18 +351,18 @@ def test_reject_stale_and_future_ts():
         s.settimeout(1.0)
         now = int(time.time())
         s.sendto(hello_pkt(key, now - 300), ("127.0.0.1", env.control_port))
-        assert recv_or_none(s) is None, "过期时间戳的握手竟收到回应"
+        assert recv_or_none(s) is None, "handshake with a stale timestamp was answered"
         s.sendto(hello_pkt(key, now + 300), ("127.0.0.1", env.control_port))
-        assert recv_or_none(s) is None, "未来时间戳的握手竟收到回应"
+        assert recv_or_none(s) is None, "handshake with a future timestamp was answered"
         s.close()
-        assert "时间戳超出" in env.server.text()
+        assert "timestamp is off by more than" in env.server.text()
     finally:
         env.stop()
         env.cleanup()
 
 
 def test_reject_replayed_hello():
-    """同一份握手报文（重放）在切换来源地址时应被拒绝。"""
+    """Replaying the same handshake from a different source address must be rejected."""
     env = Env(with_client=False)
     try:
         key = derive_key()
@@ -375,7 +378,7 @@ def test_reject_replayed_hello():
         b.bind(("127.0.0.1", 0))
         b.settimeout(1.0)
         b.sendto(pkt, ("127.0.0.1", env.control_port))
-        assert recv_or_none(b) is None, "重放的握手报文竟然拿到 ACK"
+        assert recv_or_none(b) is None, "replayed handshake got an ACK"
         a.close()
         b.close()
     finally:
@@ -384,27 +387,28 @@ def test_reject_replayed_hello():
 
 
 def test_mapping_timeout():
-    """映射 2 秒（测试配置）不活跃后会被清除，之后再访问能重新建立。"""
+    """A mapping idle for 2 seconds (test config) is dropped and can be re-created later."""
     env = Env(idle_timeout=2)
     try:
         c = inet_client()
         c.sendto(b"one", ("127.0.0.1", env.data_port))
         assert c.recv(65535) == b"echo:one"
-        wait_until(lambda: "新映射 127.0.0.1:" in env.client.text(), 3, desc="映射建立")
-        wait_until(lambda: "释放映射" in env.client.text(), 8, desc="映射超时释放")
+        wait_until(lambda: "new mapping 127.0.0.1:" in env.client.text(), 3, desc="mapping created")
+        wait_until(lambda: "released mapping" in env.client.text(), 8,
+                   desc="mapping dropped after the idle timeout")
 
-        # 超时后同一互联网客户端再发包，应重新建立映射并正常收到回包
+        # after the timeout the same internet client must get a fresh mapping and a reply
         c.sendto(b"two", ("127.0.0.1", env.data_port))
         assert c.recv(65535) == b"echo:two"
         c.close()
-        assert env.client.text().count("新映射") >= 2
+        assert env.client.text().count("new mapping") >= 2
     finally:
         env.stop()
         env.cleanup()
 
 
 def test_data_dropped_before_handshake():
-    """client 还没握手时，server 不应把数据转发出去，也不应崩溃。"""
+    """Before any handshake the server must neither forward data nor crash."""
     svc = EchoService()
     cport, dport = free_udp_port(), free_udp_port()
     server = Proc("server", f"""
@@ -421,9 +425,9 @@ psk = {PSK_HEX}
         c.settimeout(0.6)
         c.sendto(b"nobody", ("127.0.0.1", dport))
         assert recv_or_none(c, 0.6) is None
-        assert svc.hits == 0, "没有 client 时本地服务不应收到报文"
-        assert "还没收到 client 握手" in server.text()
-        assert server.proc.poll() is None, "server 不应退出"
+        assert svc.hits == 0, "local service must receive nothing without a client"
+        assert "no client handshake yet" in server.text()
+        assert server.proc.poll() is None, "server must keep running"
         c.close()
     finally:
         server.stop()
@@ -432,14 +436,15 @@ psk = {PSK_HEX}
 
 
 def test_link_broken_when_local_service_down():
-    """本地 UDP 服务没监听时不应崩溃：丢弃并释放对应映射。"""
+    """Nothing crashes when the local UDP service is down: drop the datagram and
+    release the mapping."""
     env = Env()
     try:
         c = inet_client()
-        env.svc.close()  # 让本地服务下线
+        env.svc.close()  # take the local service down
         c.sendto(b"nobody-home", ("127.0.0.1", env.data_port))
         assert recv_or_none(c, 1.0) is None
-        assert env.client.proc.poll() is None, "client 不应退出"
+        assert env.client.proc.poll() is None, "client must keep running"
         assert recv_or_none(c, 0.5) is None
         c.close()
     finally:
@@ -448,7 +453,7 @@ def test_link_broken_when_local_service_down():
 
 
 def test_client_survives_server_restart():
-    """server 重启后，client 靠心跳重新完成握手，转发自动恢复。"""
+    """After a server restart the client re-handshakes via heartbeat and forwarding resumes."""
     env = Env(heartbeat=1)
     try:
         c = inet_client()
@@ -461,18 +466,19 @@ def test_client_survives_server_restart():
         env.server.stop()
 
         env.server = Proc("server", server_cfg)
-        wait_until(lambda: "client 控制地址更新为" in env.server.text(), 10,
-                   desc="server 再次收到握手")
+        wait_until(lambda: "client control address updated to" in env.server.text(), 10,
+                   desc="server got the handshake again")
 
-        # 新 server 收到握手后，转发应自动恢复
+        # once the new server sees the handshake, forwarding should resume by itself
         ok = False
         for _ in range(50):
             c.sendto(b"after", ("127.0.0.1", env.data_port))
             if recv_or_none(c, 0.4) == b"echo:after":
                 ok = True
                 break
-        assert ok, "server 重启后转发没有恢复\n" + env.server.text()[-2000:]
-        assert "握手成功" in env.client.text()
+        assert ok, "forwarding did not resume after the server restart\n" + \
+            env.server.text()[-2000:]
+        assert "handshake with server succeeded" in env.client.text()
         c.close()
     finally:
         env.stop()
@@ -480,7 +486,7 @@ def test_client_survives_server_restart():
 
 
 def test_passthrough_passphrase_psk():
-    """psk 写成口令（非 64 hex）时两端仍能互通。"""
+    """Both ends interoperate when the psk is a passphrase instead of 64 hex chars."""
     env = Env(psk="this-is-a-long-passphrase-for-testing")
     try:
         c = inet_client()
@@ -493,7 +499,8 @@ def test_passthrough_passphrase_psk():
 
 
 def test_sustained_traffic_with_fast_heartbeat():
-    """1 秒心跳 + 持续数据流，心跳不应干扰数据转发。"""
+    """A 1-second heartbeat plus a continuous data stream: heartbeats must not
+    disturb forwarding."""
     env = Env(heartbeat=1)
     try:
         c = inet_client()
@@ -509,16 +516,17 @@ def test_sustained_traffic_with_fast_heartbeat():
 
 
 def test_max_mappings_limit():
-    """映射数量受 max_mappings 限制，超出时淘汰最久不活跃的映射且不崩溃。"""
+    """Mappings are capped by max_mappings; overflow evicts the least recently
+    active one, without crashing."""
     env = Env(max_mappings=4)
     try:
         socks = [inet_client() for _ in range(12)]
         for i, s in enumerate(socks):
             s.sendto(b"m-%d" % i, ("127.0.0.1", env.data_port))
             time.sleep(0.02)
-        assert env.client.proc.poll() is None, "client 不应退出"
-        assert "映射表已满" in env.client.text()
-        # 最近活跃的客户端仍然能正常收发（新来源一定会拿到最新的映射）
+        assert env.client.proc.poll() is None, "client must keep running"
+        assert "mapping table is full" in env.client.text()
+        # the most recently active client still works (a new source always gets the newest mapping)
         fresh = inet_client()
         fresh.sendto(b"last", ("127.0.0.1", env.data_port))
         assert fresh.recv(65535) == b"echo:last"
@@ -531,7 +539,7 @@ def test_max_mappings_limit():
 
 
 def test_bad_config():
-    """配置错误要给出明确报错并以非零状态退出。"""
+    """Bad config must produce a clear error and exit with a non-zero status."""
     def run(mode, text):
         fd, path = tempfile.mkstemp(suffix=".ini")
         with os.fdopen(fd, "w") as f:
@@ -582,7 +590,7 @@ TESTS = [
 
 def main():
     if not os.path.exists(BIN):
-        print(f"找不到 {BIN}，请先 make", file=sys.stderr)
+        print(f"{BIN} not found, run make first", file=sys.stderr)
         return 2
     only = sys.argv[1] if len(sys.argv) > 1 else None
     failed = []
@@ -600,9 +608,9 @@ def main():
             traceback.print_exc()
     print()
     if failed:
-        print(f"失败 {len(failed)} 个: {', '.join(failed)}")
+        print(f"{len(failed)} failed: {', '.join(failed)}")
         return 1
-    print("全部通过")
+    print("all tests passed")
     return 0
 
 

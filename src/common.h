@@ -1,4 +1,4 @@
-/* 通用小工具：时间、日志、socket 设置 */
+/* Small shared helpers: clocks, logging, socket setup. */
 #ifndef UFW_COMMON_H
 #define UFW_COMMON_H
 
@@ -7,13 +7,13 @@
 
 #define UFW_VERSION "1.0.0"
 
-/* 单个 UDP 报文的最大长度（IPv4 UDP payload 上限） */
+/* Max size of a single UDP datagram (IPv4 UDP payload limit). */
 #define UFW_MAX_PKT 65535
 
-/* 单调时钟，毫秒，用于超时/活跃时间 */
+/* Monotonic clock in milliseconds, used for timeouts and activity tracking. */
 uint64_t ufw_mono_ms(void);
 
-/* 墙上时钟，秒，用于控制协议的握手时间戳 */
+/* Wall clock in seconds, used for handshake timestamps of the control protocol. */
 uint64_t ufw_realtime_s(void);
 
 void ufw_log(const char *level, const char *fmt, ...)
@@ -25,7 +25,8 @@ void ufw_log(const char *level, const char *fmt, ...)
 
 int ufw_set_nonblock(int fd);
 
-/* 限速日志：同一条日志最多每 interval_ms 输出一次，并带上被压缩的条数 */
+/* Rate-limited logging: a given message is emitted at most once per interval_ms,
+ * with the number of suppressed occurrences appended. */
 struct ufw_ratelog {
     uint64_t next_ms;
     uint64_t count;

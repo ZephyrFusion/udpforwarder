@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* kdf 的上下文串，长度必须是 crypto_kdf_CONTEXTBYTES(8) */
+/* KDF context string; its length must be crypto_kdf_CONTEXTBYTES (8). */
 static const char KDF_CONTEXT[8] = {'u', 'd', 'p', 'f', 'w', 'd', '0', '1'};
 #define KDF_SUBKEY_ID 1ULL
 
@@ -35,29 +35,31 @@ int fwd_key_from_psk(const char *psk, unsigned char key[FWD_KEY_LEN], char *err,
     unsigned char master[FWD_KEY_LEN];
 
     if (!psk || *psk == '\0') {
-        snprintf(err, errlen, "缺少 psk");
+        snprintf(err, errlen, "missing psk");
         return -1;
     }
 
     if (is_hex32(psk)) {
         if (hex_to_bytes(psk, master, sizeof(master)) != 0) {
-            snprintf(err, errlen, "psk 的 hex 解码失败");
+            snprintf(err, errlen, "psk hex decoding failed");
             return -1;
         }
     } else {
         if (strlen(psk) < 16) {
-            snprintf(err, errlen, "psk 太短（口令至少 16 字符，或用 64 个 hex 字符）");
+            snprintf(err, errlen,
+                     "psk is too short (a passphrase needs at least 16 characters, or use 64 "
+                     "hex characters)");
             return -1;
         }
         if (crypto_generichash(master, sizeof(master), (const unsigned char *)psk,
                                strlen(psk), NULL, 0) != 0) {
-            snprintf(err, errlen, "psk 摘要失败");
+            snprintf(err, errlen, "psk digest failed");
             return -1;
         }
     }
 
     if (crypto_kdf_derive_from_key(key, FWD_KEY_LEN, KDF_SUBKEY_ID, KDF_CONTEXT, master) != 0) {
-        snprintf(err, errlen, "kdf 派生失败");
+        snprintf(err, errlen, "kdf derivation failed");
         return -1;
     }
     sodium_memzero(master, sizeof(master));

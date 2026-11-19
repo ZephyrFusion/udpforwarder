@@ -1,4 +1,5 @@
-/* client 端：把 server 转发过来的 payload 用 127.0.0.1 上的临时端口发给本地 UDP 服务 */
+/* Client side: sends payloads forwarded by the server to the local UDP service
+ * through an ephemeral port on 127.0.0.1. */
 #include "client.h"
 
 #include <arpa/inet.h>
@@ -18,7 +19,7 @@
 #define EP_NAME "client"
 #define MAX_MAPPINGS 4096
 
-/* 一个映射：本地 127.0.0.1 的临时端口 <-> 互联网侧的 ipv4+port */
+/* One mapping: an ephemeral 127.0.0.1 port <-> an internet-side ipv4+port. */
 struct mapping {
     int fd;
     uint16_t lport;
@@ -28,7 +29,7 @@ struct mapping {
 
 struct client {
     int epfd;
-    int ctl_fd; /* 与 server 控制端口通信的 socket */
+    int ctl_fd; /* socket used to talk to the server control port */
     unsigned char key[FWD_KEY_LEN];
 
     struct sockaddr_in server_addr;
@@ -38,12 +39,12 @@ struct client {
     uint64_t next_hello_ms;
     uint64_t idle_ms;
 
-    /* 最近几次握手的上行时间戳，用来匹配 server 回的 ACK */
+    /* Timestamps of the latest handshakes, used to match ACKs from the server. */
     uint64_t recent_ts[8];
     int recent_pos;
     int recent_cnt;
 
-    int connected; /* 收到过有效 ACK */
+    int connected; /* a valid ACK has been received */
     uint64_t last_ack_ms;
 
     struct mapping *maps;
@@ -66,12 +67,12 @@ static int parse_ipport_pair(const char *host_str, const char *port_str, struct 
     memset(out, 0, sizeof(*out));
     out->sin_family = AF_INET;
     if (!host_str || inet_pton(AF_INET, host_str, &out->sin_addr) != 1) {
-        log_error("[" EP_NAME "] %s 的地址不合法: %s（只支持 ipv4 点分十进制）", what,
-                  host_str ? host_str : "(空)");
+        log_error("[" EP_NAME "] %s address is invalid: %s (only ipv4 dotted decimal is "
+                  "supported)", what, host_str ? host_str : "(empty)");
         return -1;
     }
     if (!port_str) {
-        log_error("[" EP_NAME "] 缺少 %s 的端口", what);
+        log_error("[" EP_NAME "] missing port for %s", what);
         return -1;
     }
     errno = 0;
@@ -79,7 +80,7 @@ static int parse_ipport_pair(const char *host_str, const char *port_str, struct 
         char *end = NULL;
         port = strtoul(port_str, &end, 10);
         if (errno != 0 || end == port_str || *end != '\0' || port < 1 || port > 65535) {
-            log_error("[" EP_NAME "] %s 的端口不合法: %s", what, port_str);
+            log_error("[" EP_NAME "] %s port is invalid: %s", what, port_str);
             return -1;
         }
     }
@@ -87,7 +88,7 @@ static int parse_ipport_pair(const char *host_str, const char *port_str, struct 
     return 0;
 }
 
-/* ---------- 映射表 ---------- */
+/* ---------- mapping table ---------- */
 
 static struct mapping *map_by_remote(struct client *c, const struct fwd_addr *remote)
 {
@@ -112,13 +113,13 @@ static void map_destroy(struct client *c, struct mapping *m)
 
     epoll_ctl(c->epfd, EPOLL_CTL_DEL, m->fd, NULL);
     close(m->fd);
-    log_info("[" EP_NAME "] 释放映射 127.0.0.1:%u <-> %s", (unsigned)m->lport,
+    log_info("[" EP_NAME "] released mapping 127.0.0.1:%u <-> %s", (unsigned)m->lport,
              fwd_addr_str(&m->remote, buf, sizeof(buf)));
     c->maps[idx] = c->maps[c->nmaps - 1];
     c->nmaps--;
 }
 
-/* 满了就淘汰最久不活跃的那个 */
+/* When full, evict the least recently active mapping. */
 static int map_make_room(struct client *c)
 {
     struct mapping *oldest = NULL;
@@ -129,10 +130,12 @@ static int map_make_room(struct client *c)
         if (!oldest || c->maps[i].last_ms < oldest->last_ms)
             oldest = &c->maps[i];
     if (!oldest) {
-        ufw_ratelog_emit(&c->rl_local, "WARN", "[" EP_NAME "] 映射表已满，丢弃新客户端");
+        ufw_ratelog_emit(&c->rl_local, "WARN",
+                         "[" EP_NAME "] mapping table is full, dropping the new client");
         return -1;
     }
-    log_warn("[" EP_NAME "] 映射表已满（%d 个），淘汰最久不活跃的映射", c->ncap);
+    log_warn("[" EP_NAME "] mapping table is full (%d entries), evicting the least recently "
+             "active mapping", c->ncap);
     map_destroy(c, oldest);
     return 0;
 }
@@ -158,15 +161,15 @@ static struct mapping *map_create(struct client *c, const struct fwd_addr *remot
     local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     local.sin_port = 0;
     if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
-        ufw_ratelog_emit(&c->rl_local, "ERROR", "[" EP_NAME "] bind 127.0.0.1:0 失败: %s",
+        ufw_ratelog_emit(&c->rl_local, "ERROR", "[" EP_NAME "] bind 127.0.0.1:0 failed: %s",
                          strerror(errno));
         close(fd);
         return NULL;
     }
-    /* 只跟配置的本地服务通信，顺带过滤掉杂包 */
+    /* talk to the configured local service only; this also filters stray packets */
     if (connect(fd, (struct sockaddr *)&c->svc_addr, sizeof(c->svc_addr)) < 0) {
-        ufw_ratelog_emit(&c->rl_local, "ERROR", "[" EP_NAME "] connect 本地服务失败: %s",
-                         strerror(errno));
+        ufw_ratelog_emit(&c->rl_local, "ERROR",
+                         "[" EP_NAME "] connect to the local service failed: %s", strerror(errno));
         close(fd);
         return NULL;
     }
@@ -194,7 +197,7 @@ static struct mapping *map_create(struct client *c, const struct fwd_addr *remot
 
     {
         char buf[24];
-        log_info("[" EP_NAME "] 新映射 127.0.0.1:%u <-> %s", (unsigned)m->lport,
+        log_info("[" EP_NAME "] new mapping 127.0.0.1:%u <-> %s", (unsigned)m->lport,
                  fwd_addr_str(&m->remote, buf, sizeof(buf)));
     }
     return m;
@@ -211,7 +214,7 @@ static void sweep_mappings(struct client *c)
     }
 }
 
-/* ---------- 握手 ---------- */
+/* ---------- handshake ---------- */
 
 static void send_hello(struct client *c)
 {
@@ -225,7 +228,8 @@ static void send_hello(struct client *c)
         c->recent_cnt++;
 
     if (send(c->ctl_fd, pkt, sizeof(pkt), 0) < 0)
-        ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] 发送握手失败: %s", strerror(errno));
+        ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] failed to send handshake: %s",
+                         strerror(errno));
 }
 
 static int ts_recently_sent(const struct client *c, uint64_t ts)
@@ -236,7 +240,7 @@ static int ts_recently_sent(const struct client *c, uint64_t ts)
     return 0;
 }
 
-/* server 对握手的应答 */
+/* Server reply to a handshake. */
 static void handle_ack(struct client *c, const uint8_t *pkt, size_t len)
 {
     uint64_t cts = 0;
@@ -245,29 +249,32 @@ static void handle_ack(struct client *c, const uint8_t *pkt, size_t len)
 
     if (rc == -2) {
         ufw_ratelog_emit(&c->rl_ctl, "WARN",
-                         "[" EP_NAME "] 握手 ACK 的 server 时间戳超出 ±%d 秒（两端时钟不一致？）",
+                         "[" EP_NAME "] handshake ACK server timestamp is off by more than "
+                         "±%d seconds (clock skew between the two ends?)",
                          FWD_TS_MAX_SKEW);
         return;
     }
     if (rc != 0) {
         ufw_ratelog_emit(&c->rl_ctl, "WARN",
-                         "[" EP_NAME "] 握手 ACK 校验失败，忽略（psk 不一致或伪造报文）");
+                         "[" EP_NAME "] handshake ACK verification failed, ignoring "
+                         "(psk mismatch or forged packet)");
         return;
     }
     if (!ts_recently_sent(c, cts)) {
         ufw_ratelog_emit(&c->rl_ctl, "WARN",
-                         "[" EP_NAME "] 握手 ACK 回显的时间戳与我方握手的都对不上，忽略");
+                         "[" EP_NAME "] handshake ACK echoed timestamp does not match our "
+                         "handshake, ignoring");
         return;
     }
 
     c->last_ack_ms = ufw_mono_ms();
     if (!c->connected) {
         c->connected = 1;
-        log_info("[" EP_NAME "] 与 server 握手成功（ACK 已收到），链路可用");
+        log_info("[" EP_NAME "] handshake with server succeeded (ACK received), link is up");
     }
 }
 
-/* ---------- 控制 socket：server 转发来的数据 ---------- */
+/* ---------- control socket: data forwarded by the server ---------- */
 
 static void on_ctl_readable(struct client *c)
 {
@@ -279,8 +286,9 @@ static void on_ctl_readable(struct client *c)
                 return;
             if (errno == EINTR)
                 continue;
-            /* 常见于 server 还没起来/端口不通，ICMP 错误会透传到 connected socket */
-            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] 控制 socket 收包失败: %s",
+            /* Usually the server is not up yet or the port is unreachable; ICMP
+             * errors surface on a connected socket. */
+            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] control socket receive failed: %s",
                              strerror(errno));
             return;
         }
@@ -292,13 +300,13 @@ static void on_ctl_readable(struct client *c)
             continue;
         }
         if (c->rx[0] != FWD_TYPE_DATA) {
-            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] 控制端口收到未知类型 %u",
-                             c->rx[0]);
+            ufw_ratelog_emit(&c->rl_ctl, "WARN",
+                             "[" EP_NAME "] unknown message type %u on control port", c->rx[0]);
             continue;
         }
         if ((size_t)n < 1 + FWD_HDR_LEN) {
-            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] 丢弃过短的下行报文（%zd 字节）",
-                             n);
+            ufw_ratelog_emit(&c->rl_ctl, "WARN",
+                             "[" EP_NAME "] dropping short downstream packet (%zd bytes)", n);
             continue;
         }
 
@@ -316,13 +324,14 @@ static void on_ctl_readable(struct client *c)
             }
             m->last_ms = ufw_mono_ms();
             if (send(m->fd, c->rx + 1 + FWD_HDR_LEN, payload_len, 0) < 0)
-                ufw_ratelog_emit(&c->rl_local, "WARN", "[" EP_NAME "] 发给本地服务失败: %s",
+                ufw_ratelog_emit(&c->rl_local, "WARN",
+                                 "[" EP_NAME "] failed to send to the local service: %s",
                                  strerror(errno));
         }
     }
 }
 
-/* ---------- 本地服务 socket：回程数据 ---------- */
+/* ---------- local service socket: return traffic ---------- */
 
 static void on_local_readable(struct client *c, int fd)
 {
@@ -338,14 +347,16 @@ static void on_local_readable(struct client *c, int fd)
                 return;
             if (errno == EINTR)
                 continue;
-            /* 本地服务没监听时 connected socket 会拿到 ECONNREFUSED，直接释放映射 */
+            /* With nobody listening on the local service, a connected socket gets
+             * ECONNREFUSED; just drop the mapping. */
             if (errno == ECONNREFUSED) {
                 ufw_ratelog_emit(&c->rl_local, "WARN",
-                                 "[" EP_NAME "] 本地服务拒绝连接，释放映射");
+                                 "[" EP_NAME "] the local service refused the connection, "
+                                 "releasing mapping");
                 map_destroy(c, m);
                 return;
             }
-            ufw_ratelog_emit(&c->rl_local, "WARN", "[" EP_NAME "] 本地 socket 收包失败: %s",
+            ufw_ratelog_emit(&c->rl_local, "WARN", "[" EP_NAME "] local socket receive failed: %s",
                              strerror(errno));
             return;
         }
@@ -355,7 +366,7 @@ static void on_local_readable(struct client *c, int fd)
         if (n > 0)
             memcpy(c->tx + 1 + FWD_HDR_LEN, c->rx, (size_t)n);
         if (send(c->ctl_fd, c->tx, 1 + FWD_HDR_LEN + (size_t)n, 0) < 0)
-            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] 发给 server 失败: %s",
+            ufw_ratelog_emit(&c->rl_ctl, "WARN", "[" EP_NAME "] failed to send to server: %s",
                              strerror(errno));
         m->last_ms = ufw_mono_ms();
     }
@@ -386,11 +397,11 @@ int client_main(const char *cfg_path)
     server_host = ini_get(ini, "client", "server_host");
     if (ini_get_uint(ini, "client", "server_control_port", 0, 1, 65535, &ctl_port) != 0 ||
         ctl_port == 0) {
-        log_error("[" EP_NAME "] client.server_control_port 缺失或不在 1-65535 之间");
+        log_error("[" EP_NAME "] client.server_control_port is missing or not within 1-65535");
         goto out;
     }
     if (!server_host) {
-        log_error("[" EP_NAME "] 缺少 client.server_host");
+        log_error("[" EP_NAME "] client.server_host is missing");
         goto out;
     }
     if (parse_ipport_pair(server_host, ini_get(ini, "client", "server_control_port"),
@@ -403,7 +414,7 @@ int client_main(const char *cfg_path)
     {
         const char *svc_port_str = ini_get(ini, "client", "local_service_port");
         if (!svc_port_str) {
-            log_error("[" EP_NAME "] 缺少 client.local_service_port");
+            log_error("[" EP_NAME "] client.local_service_port is missing");
             goto out;
         }
         if (parse_ipport_pair(svc_host, svc_port_str, &c.svc_addr, "local_service") != 0)
@@ -411,15 +422,15 @@ int client_main(const char *cfg_path)
     }
 
     if (ini_get_uint(ini, "client", "heartbeat_interval", 30, 1, 3600, &hello_sec) != 0) {
-        log_error("[" EP_NAME "] heartbeat_interval 不合法（1-3600 秒）");
+        log_error("[" EP_NAME "] heartbeat_interval is invalid (1-3600 seconds)");
         goto out;
     }
     if (ini_get_uint(ini, "client", "mapping_idle_timeout", 120, 1, 86400, &idle_sec) != 0) {
-        log_error("[" EP_NAME "] mapping_idle_timeout 不合法");
+        log_error("[" EP_NAME "] mapping_idle_timeout is invalid");
         goto out;
     }
     if (ini_get_uint(ini, "client", "max_mappings", 1024, 1, MAX_MAPPINGS, &max_maps) != 0) {
-        log_error("[" EP_NAME "] max_mappings 不合法（1-%d）", MAX_MAPPINGS);
+        log_error("[" EP_NAME "] max_mappings is invalid (1-%d)", MAX_MAPPINGS);
         goto out;
     }
     psk = ini_get(ini, "key", "psk");
@@ -438,7 +449,7 @@ int client_main(const char *cfg_path)
     c.rx = malloc(UFW_MAX_PKT);
     c.tx = malloc(UFW_MAX_PKT + 1 + FWD_HDR_LEN);
     if (!c.maps || !evs || !c.rx || !c.tx) {
-        log_error("[" EP_NAME "] 内存不足");
+        log_error("[" EP_NAME "] out of memory");
         goto out;
     }
     ufw_ratelog_reset(&c.rl_ctl);
@@ -457,9 +468,10 @@ int client_main(const char *cfg_path)
         log_error("[" EP_NAME "] socket: %s", strerror(errno));
         goto out;
     }
-    /* 交给内核选源端口；connect 之后只收 server 控制端口的报文 */
+    /* let the kernel pick the source port; after connect only packets from the
+     * server control port are accepted */
     if (connect(c.ctl_fd, (struct sockaddr *)&c.server_addr, sizeof(c.server_addr)) < 0) {
-        log_error("[" EP_NAME "] connect server 失败: %s", strerror(errno));
+        log_error("[" EP_NAME "] connect to server failed: %s", strerror(errno));
         goto out;
     }
 
@@ -476,8 +488,8 @@ int client_main(const char *cfg_path)
         char vbuf[INET_ADDRSTRLEN] = {0};
         inet_ntop(AF_INET, &c.server_addr.sin_addr, sbuf, sizeof(sbuf));
         inet_ntop(AF_INET, &c.svc_addr.sin_addr, vbuf, sizeof(vbuf));
-        log_info("[" EP_NAME "] server 控制端口 %s:%u，本地服务 %s:%u，心跳间隔 %lu 秒，"
-                 "映射空闲超时 %lu 秒",
+        log_info("[" EP_NAME "] server control port %s:%u, local service %s:%u, "
+                 "heartbeat interval %lu seconds, mapping idle timeout %lu seconds",
                  sbuf, ntohs(c.server_addr.sin_port), vbuf, ntohs(c.svc_addr.sin_port), hello_sec,
                  idle_sec);
     }
@@ -492,14 +504,14 @@ int client_main(const char *cfg_path)
             send_hello(&c);
             c.next_hello_ms = now + c.hello_interval_ms;
         }
-        /* 连续 2 个心跳周期都没 ACK：提示链路不通 */
+        /* No ACK for two heartbeat periods: warn that the link looks down. */
         if (now - c.last_ack_ms > 2 * c.hello_interval_ms)
             ufw_ratelog_emit(&c.rl_unacked, "WARN",
-                             "[" EP_NAME "] 已发出心跳但没收到 server 的 ACK"
-                             "（server 未启动、端口不通或 psk 不一致？）");
+                             "[" EP_NAME "] heartbeat sent but no ACK received from the server"
+                             "(server not running, port unreachable or psk mismatch?)");
         if (c.connected && now - c.last_ack_ms > 3 * c.hello_interval_ms) {
             c.connected = 0;
-            log_warn("[" EP_NAME "] 心跳超时，与 server 的链路中断");
+            log_warn("[" EP_NAME "] heartbeat timed out, the link to the server is down");
         }
         {
             int64_t until_hello = (int64_t)(c.next_hello_ms - ufw_mono_ms());
